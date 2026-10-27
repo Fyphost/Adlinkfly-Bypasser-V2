@@ -1,0 +1,21 @@
+services:
+  resolver:
+    build: .
+    image: adlinkfly-resolver:latest
+    env_file: .env
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    init: false # tini is the image entrypoint
+    # Hardening: read-only root FS (Chromium profiles live in the /tmp tmpfs), no privileges.
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    shm_size: 1gb
+    mem_limit: 3g
+    cpus: 2
+    stop_grace_period: 60s

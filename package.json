@@ -1,0 +1,32 @@
+{
+  "name": "adlinkfly-resolver",
+  "version": "2.0.0",
+  "description": "Secure REST API that resolves AdLinkFly-based short links (e.g. arolinks.com) to their final destination using an intelligent Playwright browser agent.",
+  "type": "module",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "dev": "node src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --test-concurrency=2 \"test/**/*.test.ts\"",
+    "test:unit": "node --test \"test/unit/**/*.test.ts\"",
+    "test:integration": "node --test --test-concurrency=1 \"test/integration/**/*.test.ts\"",
+    "keygen": "node src/tools/keygen.ts",
+    "browsers:install": "playwright install --with-deps chromium",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\""
+  },
+  "dependencies": {
+    "playwright": "^1.58.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "prettier": "^3.6.0",
+    "typescript": "^5.9.0"
+  }
+}
