@@ -27,6 +27,8 @@ export interface EgressEvent {
   port: number;
   reason: string;
   at: number;
+  /** Known only for in-browser route-guard events: whether a navigation request was blocked. */
+  navigation?: boolean;
 }
 
 export interface EgressSessionLimits {
@@ -380,6 +382,12 @@ export class EgressProxy {
       });
       up.pipe(res);
       up.on('end', done);
+      // An upstream reset mid-body must reach the browser as a failed response, not a hung one.
+      up.on('error', () => res.destroy());
+      up.on('close', () => {
+        if (!up.complete) res.destroy();
+        done();
+      });
     });
     upstream.on('timeout', () => upstream.destroy(new Error('upstream timeout')));
     upstream.on('error', (err: NodeJS.ErrnoException) => {

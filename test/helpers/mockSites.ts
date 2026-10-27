@@ -396,6 +396,35 @@ var app_vars = {"counter_value":"${counter}","counter_start":"DOMContentLoaded",
       );
       return;
     }
+    if (alias === 'scriptcaptcha') {
+      // Invisible CAPTCHA attached purely from script (no g-recaptcha class / data-sitekey markup).
+      // A stand-in "grecaptcha" library is defined inline because the real one cannot load offline.
+      html(
+        res,
+        page(
+          'Verify to continue',
+          `<h2>Click verify to continue to your link</h2><button class="btn" id="btn-verify">Verify</button>
+<script>
+window.grecaptcha = { render: function (el, opts) { var b = typeof el === 'string' ? document.getElementById(el) : el;
+  b.addEventListener('click', function () { opts.callback('token'); }); return 0; } };
+grecaptcha.render('btn-verify', { sitekey: 'k', size: 'invisible', callback: function () { location.href='${U('dest.test', '/scriptcaptcha-target')}'; } });
+</script>`,
+        ),
+      );
+      return;
+    }
+    if (alias === 'badges') {
+      // Static numbers in counter-like elements must not be mistaken for countdowns.
+      html(
+        res,
+        page(
+          'Your link is ready',
+          `<div class="post-meta"><span class="post-views-count">1240</span> views · <span class="comment-count">12</span> comments · <span class="counter">87</span> likes</div>
+<h2>Your link is ready</h2><a class="btn" href="${U('dest.test', '/badges-target')}">Continue</a>`,
+        ),
+      );
+      return;
+    }
     if (alias === 'robot') {
       html(
         res,

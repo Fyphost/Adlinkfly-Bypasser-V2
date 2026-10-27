@@ -47,8 +47,13 @@ export function assessChallenge(snap: PageSnapshot): ChallengeAssessment {
     return { blocking: true, interstitial: false, type: 'text_captcha', reason: 'image/text CAPTCHA input' };
   }
   const captchaProvider = c.providers.find((p) => p !== 'cloudflare');
-  // AdLinkFly's first step (form#link-view) is CAPTCHA-protected whenever a provider is present on it.
-  if (snap.markers.linkViewForm && captchaProvider) {
+  if (c.scriptBound) {
+    // The page explicitly rendered a CAPTCHA widget (visible or invisible) from script.
+    return { blocking: true, interstitial: false, type: captchaProvider ?? 'captcha', reason: 'CAPTCHA widget rendered on the page' };
+  }
+  // AdLinkFly's first step (form#link-view) is CAPTCHA-protected when a provider is present or its
+  // #captchaShortlink container holds a widget.
+  if (snap.markers.linkViewForm && (captchaProvider || snap.markers.captchaShortlink)) {
     return {
       blocking: true,
       interstitial: false,

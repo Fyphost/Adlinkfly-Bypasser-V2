@@ -18,6 +18,7 @@ import { AppError } from '../errors.ts';
 import type { EgressProxy, EgressSession } from '../security/egressProxy.ts';
 import type { UrlPolicy } from '../security/urlPolicy.ts';
 import { isAdHost } from './adDomains.ts';
+import { captchaRenderHook } from './initScripts.ts';
 import { settle, withTimeout } from '../util.ts';
 
 export interface JobContext {
@@ -215,43 +216,60 @@ export class BrowserManager {
     const routeStats = { blockedPolicy: 0, blockedResource: 0, total: 0 };
     const blockTypes = new Set(this.cfg.blockResourceTypes);
     const blockAds = this.cfg.blockAdDomains;
-    await context.route('**/*', async (route: Route, request: Request) => {
-      routeStats.total++;
-      const url = request.url();
-      try {
-        if (url.startsWith('http:') || url.startsWith('https:')) {
-          const verdict = this.policy.checkNetworkUrl(url);
-          if (!verdict.allowed) {
-            routeStats.blockedPolicy++;
-            let host = '';
-            let port = 0;
-            try {
-              const u = new URL(url);
-              host = u.hostname.replace(/^\[|\]$/g, '');
-              port = Number(u.port) || (u.protocol === 'https:' ? 443 : 80);
-            } catch {
-              /* ignore */
+    const abandon = async (err: unknown): Promise<never> => {
+      // Undo everything acquired so far: nothing may leak if setup fails half-way.
+      this.proxy.closeSession(session);
+      await settle(withTimeout(context.close(), 10_000));
+      slot.active--;
+      if ((slot.retiring || !slot.browser.isConnected()) && slot.active <= 0) await this.closeSlot(slot);
+      throw new AppError('BROWSER_ERROR', { detail: 'Could not prepare a browser context', cause: err, retryable: true });
+    };
+    try {
+      await context.addInitScript(captchaRenderHook);
+    } catch (err) {
+      return abandon(err);
+    }
+    try {
+      await context.route('**/*', async (route: Route, request: Request) => {
+        routeStats.total++;
+        const url = request.url();
+        try {
+          if (url.startsWith('http:') || url.startsWith('https:')) {
+            const verdict = this.policy.checkNetworkUrl(url);
+            if (!verdict.allowed) {
+              routeStats.blockedPolicy++;
+              let host = '';
+              let port = 0;
+              try {
+                const u = new URL(url);
+                host = u.hostname.replace(/^\[|\]$/g, '');
+                port = Number(u.port) || (u.protocol === 'https:' ? 443 : 80);
+              } catch {
+                /* ignore */
+              }
+              session.record({ kind: 'policy', host, port, reason: verdict.reason, navigation: request.isNavigationRequest() });
+              await route.abort('blockedbyclient');
+              return;
             }
-            session.record({ kind: 'policy', host, port, reason: verdict.reason });
-            await route.abort('blockedbyclient');
-            return;
+            if (blockTypes.has(request.resourceType()) && !request.isNavigationRequest()) {
+              routeStats.blockedResource++;
+              await route.abort('blockedbyclient');
+              return;
+            }
+            if (blockAds && !request.isNavigationRequest() && isAdHost(new URL(url).hostname)) {
+              routeStats.blockedResource++;
+              await route.abort('blockedbyclient');
+              return;
+            }
           }
-          if (blockTypes.has(request.resourceType()) && !request.isNavigationRequest()) {
-            routeStats.blockedResource++;
-            await route.abort('blockedbyclient');
-            return;
-          }
-          if (blockAds && !request.isNavigationRequest() && isAdHost(new URL(url).hostname)) {
-            routeStats.blockedResource++;
-            await route.abort('blockedbyclient');
-            return;
-          }
+          await route.continue();
+        } catch {
+          // Context/page closed while routing — nothing to do.
         }
-        await route.continue();
-      } catch {
-        // Context/page closed while routing — nothing to do.
-      }
-    });
+      });
+    } catch (err) {
+      return abandon(err);
+    }
 
     // Idempotent: concurrent callers (abort handler + finally block) share the same teardown.
     let releasing: Promise<void> | null = null;

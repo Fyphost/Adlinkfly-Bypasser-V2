@@ -3,6 +3,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { startMockSites, type MockSites } from '../helpers/mockSites.ts';
 import { postResolve, startTestApp } from '../helpers/testApp.ts';
+import { Logger } from '../../src/logger.ts';
 
 let sites: MockSites;
 
@@ -84,8 +85,9 @@ describe('concurrency', () => {
     assert.equal(b.body.error_code, 'SHUTTING_DOWN');
   });
 
-  it('cancels the browser job when the client disconnects', async () => {
-    const t = await startTestApp({ MAX_CONCURRENT_JOBS: '2' });
+  it('cancels the browser job when the client disconnects (and still writes an access-log line)', async () => {
+    const lines: string[] = [];
+    const t = await startTestApp({ MAX_CONCURRENT_JOBS: '2' }, { logger: new Logger({ level: 'info', sink: (l) => lines.push(l) }) });
     try {
       const controller = new AbortController();
       const req = fetch(`${t.base}/api/resolve`, {
@@ -104,6 +106,10 @@ describe('concurrency', () => {
       }
       assert.equal(t.app.queue.stats().active, 0);
       assert.equal(t.app.browsers.status().activeContexts, 0);
+      const access = lines.map((l) => JSON.parse(l) as Record<string, unknown>).find((l) => l.msg === 'request' && l.route === 'resolve');
+      assert.ok(access, 'access log line written for the aborted request');
+      assert.equal(access.completed, false);
+      assert.equal(access.status, 499);
     } finally {
       await t.close();
     }

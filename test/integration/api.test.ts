@@ -101,6 +101,7 @@ describe('request validation', () => {
 
   it('answers unknown routes with 404 and wrong methods with 405', async () => {
     assert.equal((await get('/nope')).status, 404);
+    assert.equal((await get('/api/jobs/%E0%A4%A', null)).status, 404, 'malformed escapes are not a 500');
     const r = await get('/api/resolve');
     assert.equal(r.status, 405);
     assert.equal(r.headers.get('allow'), 'POST');

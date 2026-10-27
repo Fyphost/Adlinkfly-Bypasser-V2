@@ -40,7 +40,7 @@
 4. **Browser**: create a new incognito context with its own egress-proxy credentials, `acceptDownloads: false`, blocked service workers, no permissions, and a route guard.
 5. **Agent**: run the loop below until there is a destination or an error.
 6. **Extraction**: unwrap wrappers, follow known redirectors, strip tracking parameters, apply the destination deny-list. If the destination is another supported short link, resolve it too, up to `MAX_CHAIN_DEPTH`.
-7. **Cleanup**: always close the context and the egress session. The slot is released only after cleanup has finished.
+7. **Cleanup**: always close the context and the egress session (network access is cut first). The queue slot is released once cleanup has finished. A job that ignores its abort signal is force-released 15 s after its deadline, so a stuck job can't hold capacity forever. Redirector probing also stops on abort.
 
 ## The agent loop
 
@@ -49,7 +49,7 @@ Each step (bounded by `MAX_STEPS`):
 1. **Evidence check.** Has the network already revealed the destination? Sources include the platform API JSON (AdLinkFly `/links/go`, plus any `form#go-link` action URL learned from the page), a download, or a non-HTML document.
 2. **Observe.** `pageProbe` runs inside the main frame and inside same-site iframes. It collects:
    - every visible clickable element (links, buttons, inputs, `role=button`, `onclick` elements, and `cursor:pointer` elements with short text), with label, attributes, geometry, whether it is covered by another element, and whether it sits in an ad container or nav/header/footer;
-   - countdowns, from timer elements and from text such as "wait 10 seconds";
+   - countdowns, from elements whose id/class *tokens* name a timer (`timer`, `countdown`, `counter`, `wait`, …; never `views`, `comments` and the like) and from text such as "wait 10 seconds". A bare number is only trusted as a countdown once it has been seen ticking, so static counters can't stall or fail a job;
    - CAPTCHA and challenge signals;
    - AdLinkFly markers, meta refresh, forms and link hosts.
 
@@ -99,8 +99,8 @@ The agent **never** interacts with a CAPTCHA or challenge. It stops and reports 
 - a visible reCAPTCHA, hCaptcha, Turnstile, Arkose or GeeTest widget;
 - a text or image CAPTCHA;
 - a Cloudflare interstitial that has not cleared on its own within `CHALLENGE_AUTO_WAIT_MS`;
-- an AdLinkFly `link-view` form with a CAPTCHA provider;
-- an invisible CAPTCHA bound to the action button;
+- an AdLinkFly `link-view` form with a CAPTCHA provider or a widget inside `#captchaShortlink`;
+- an invisible CAPTCHA bound to the action button. This covers both declarative markup and script calls to `grecaptcha` / `hcaptcha` / `turnstile.render()`; an init script observes those calls without changing their behaviour;
 - a button asking the visitor to confirm being human;
 - strong text cues ("verify you are human", "complete the security check", …);
 - the AI advisor answering `blocked`.
@@ -119,7 +119,7 @@ A plain "Verify" button that is just a navigation step, with no challenge attach
   - Every job gets a fresh incognito context. Downloads are off, service workers are blocked, and no permissions are granted.
   - Chromium's popup blocker is on.
   - WebRTC is restricted to proxied connections, and QUIC and DNS prefetch are disabled.
-  - The OS sandbox can be enabled with `BROWSER_SANDBOX`.
+  - The OS sandbox can be enabled with `BROWSER_SANDBOX`. It is off by default because most container runtimes don't allow it without extra configuration. While it is off, a renderer exploit could open sockets directly, so add the network-level egress rules described in [DEPLOYMENT.md](DEPLOYMENT.md#defence-in-depth-network-egress-rules).
 - **API.**
   - API keys can be stored as SHA-256 digests and are compared in constant time.
   - Per-key rate limits, auth-failure lockout per IP, a body size limit and strict JSON validation.

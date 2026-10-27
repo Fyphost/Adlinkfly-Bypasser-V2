@@ -13,6 +13,8 @@ export interface FinalizeOptions {
   destinationDenylist: string[];
   isFlowHost: (host: string) => boolean;
   httpClient?: SafeHttpClient;
+  /** Aborts redirector probing when the job is cancelled or times out. */
+  signal?: AbortSignal;
 }
 
 export interface FinalizedDestination {
@@ -55,6 +57,7 @@ export async function finalizeDestination(raw: string, opts: FinalizeOptions): P
       const followed = await followRedirectors(current, opts.httpClient, {
         maxHops: opts.maxRedirectHops,
         isRedirector: isShortRedirectorHost,
+        signal: opts.signal,
       });
       if (followed.url !== current) {
         unwrapped.push(...followed.hops);

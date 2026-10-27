@@ -86,6 +86,12 @@ describe('supported shortener flows', { concurrency: 4 }, () => {
     assert.ok((r.body.trace as Array<{ action: string }>).some((s) => s.action === 'wrong-turn'));
   });
 
+  it('does not mistake static view/comment/like counters for countdowns', async () => {
+    const r = await resolve('short.test', '/badges');
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.destination_url, sites.url('dest.test', '/badges-target'));
+  });
+
   it('waits for a disabled button to become enabled', async () => {
     const r = await resolve('short.test', '/disabled');
     assert.equal(r.body.destination_url, sites.url('dest.test', '/disabled-target'), JSON.stringify(r.body));

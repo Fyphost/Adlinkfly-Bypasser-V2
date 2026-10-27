@@ -27,7 +27,8 @@ export class SafeHttpClient {
     this.userAgent = options.userAgent ?? 'Mozilla/5.0 (compatible; LinkResolver/1.0)';
   }
 
-  async probe(url: string, method: 'HEAD' | 'GET' = 'HEAD'): Promise<HeadResult> {
+  async probe(url: string, method: 'HEAD' | 'GET' = 'HEAD', signal?: AbortSignal): Promise<HeadResult> {
+    signal?.throwIfAborted();
     const u = new URL(url);
     const verdict = this.policy.checkNetworkUrl(u);
     if (!verdict.allowed) throw new Error(`blocked by policy: ${verdict.reason}`);
@@ -44,6 +45,7 @@ export class SafeHttpClient {
           headers: { 'user-agent': this.userAgent, accept: '*/*' },
           lookup: this.resolver.lookupFunction(),
           timeout: this.timeoutMs,
+          signal,
         },
         (res) => {
           const loc = res.headers.location;
@@ -65,19 +67,20 @@ export class SafeHttpClient {
 export async function followRedirectors(
   start: string,
   client: SafeHttpClient,
-  options: { maxHops: number; isRedirector: (host: string) => boolean },
+  options: { maxHops: number; isRedirector: (host: string) => boolean; signal?: AbortSignal },
 ): Promise<{ url: string; hops: string[] }> {
   let current = start;
   const hops: string[] = [];
   for (let i = 0; i < options.maxHops; i++) {
+    if (options.signal?.aborted) break;
     const host = new URL(current).hostname;
     if (!options.isRedirector(host)) break;
     let res: HeadResult;
     try {
-      res = await client.probe(current, 'HEAD');
-      if (res.status === 405 || res.status === 501) res = await client.probe(current, 'GET');
+      res = await client.probe(current, 'HEAD', options.signal);
+      if (res.status === 405 || res.status === 501) res = await client.probe(current, 'GET', options.signal);
     } catch {
-      break; // keep the last known URL; the redirector is unreachable
+      break; // keep the last known URL; the redirector is unreachable (or the job was aborted)
     }
     if (res.status < 300 || res.status >= 400 || !res.location) break;
     let next: URL;

@@ -131,6 +131,8 @@ export class ResolutionAgent {
   private readonly learnedApiUrls = new Set<string>();
   private lastFlowUrl: string | null = null;
   private wrongTurns = 0;
+  /** Countdown readings of the previous observation of each URL (to confirm a timer is ticking). */
+  private readonly lastReadings = new Map<string, Map<string, number>>();
   private readonly stalledCountdownUrls = new Set<string>();
   private readonly dialogs: string[] = [];
   private readonly platformMessages: string[] = [];
@@ -380,6 +382,7 @@ export class ResolutionAgent {
       await settle(p.close());
       return;
     }
+    if (p === this.page) return; // already made the active page (e.g. by checkPageHealth) meanwhile
     const exp = this.expectedPopup;
     const live = !!exp && exp.until > Date.now();
     const host = hostOf(url);
@@ -387,6 +390,7 @@ export class ResolutionAgent {
     const intoFlow = live && !!host && this.isFlowHost(host);
     if (matchesExpected || intoFlow) {
       const old = this.page;
+      this.expectedPopup = null; // one click adopts at most one pop-up
       this.page = p;
       this.lastMainStatus = null;
       this.record('adopt-popup', url);
@@ -461,11 +465,13 @@ export class ResolutionAgent {
     this.lastMainStatus = null;
     this.egressBlockedMain = null;
     this.navStartedAt = Date.now();
+    const pageBefore = this.page;
     try {
-      const resp = await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: this.cfg.navigationTimeoutMs, referer });
-      if (resp) this.lastMainStatus = resp.status();
+      const resp = await pageBefore.goto(url, { waitUntil: 'domcontentloaded', timeout: this.cfg.navigationTimeoutMs, referer });
+      if (resp && this.page === pageBefore) this.lastMainStatus = resp.status();
     } catch (err) {
       this.throwIfAborted();
+      if (this.page !== pageBefore) return; // a pop-up carrying the flow was adopted meanwhile
       const msg = (err as Error).message ?? String(err);
       if (this.bestEvidence(0.85)) return; // e.g. the navigation turned into a download
       if ((err as Error).name === 'TimeoutError' || /Timeout \d+ms exceeded/.test(msg)) {
@@ -485,16 +491,19 @@ export class ResolutionAgent {
   /** Maps a failed main-frame navigation to a meaningful error (policy block, DNS, TLS, timeout…). */
   private failNavigation(url: string, errorText: string, initial: boolean): never {
     let host = hostOf(url) ?? '';
+    const since = this.navStartedAt - 50;
+    // Only events that belong to this navigation: same host and recent, or a blocked *navigation*
+    // request (route guard) — never an unrelated blocked sub-resource such as a tracker pixel.
     let ev = host ? this.job.session.lastEventFor(host) : undefined;
+    if (ev && ev.at < since) ev = undefined;
     if (!ev) {
-      // Redirect targets are not always visible as the failed URL: use the most recent egress event.
-      const recent = [...this.job.session.events].reverse().find((e) => e.at >= this.navStartedAt - 50);
-      if (recent) {
-        ev = recent;
-        host = recent.host;
+      const nav = [...this.job.session.events].reverse().find((e) => e.at >= since && e.navigation === true);
+      if (nav) {
+        ev = nav;
+        host = nav.host;
       }
     }
-    if (ev?.kind === 'policy' || /ERR_BLOCKED_BY_CLIENT/.test(errorText)) {
+    if (ev?.kind === 'policy' || (/ERR_BLOCKED_BY_CLIENT/.test(errorText) && ev)) {
       const reason = ev?.reason ?? 'blocked by egress policy';
       if (initial && host === this.startUrl.hostname)
         throw new AppError('URL_NOT_ALLOWED', { detail: `The URL is not permitted: ${reason}` });
@@ -622,6 +631,7 @@ export class ResolutionAgent {
       challenge.providers = [...new Set([...challenge.providers, ...r.challenge.providers])];
       challenge.visibleWidgets = [...new Set([...challenge.visibleWidgets, ...r.challenge.visibleWidgets])];
       challenge.invisibleBound ||= r.challenge.invisibleBound;
+      challenge.scriptBound ||= r.challenge.scriptBound;
       challenge.captchaInputs += r.challenge.captchaInputs;
       challenge.captchaImages += r.challenge.captchaImages;
       challenge.textCues = [...new Set([...challenge.textCues, ...r.challenge.textCues])];
@@ -825,14 +835,25 @@ export class ResolutionAgent {
     }
   }
 
+  /**
+   * A reading is trusted as a countdown when it carries a unit / wait context, or when it has been
+   * seen decreasing. Bare numbers seen once (badges, counters) only earn a short verification wait,
+   * so they can never exhaust the wait budget or fail the job.
+   */
   private countdownAction(snap: PageSnapshot): AgentAction | null {
     const key = withoutHash(snap.url);
+    const previous = this.lastReadings.get(key);
+    this.lastReadings.set(key, new Map(snap.countdowns.map((c) => [c.key, c.value])));
     if (this.stalledCountdownUrls.has(key)) return null;
     const active = snap.countdowns.filter((c) => c.value > 0);
     if (active.length === 0) return null;
-    const max = Math.max(...active.map((c) => c.value));
-    const ms = Math.min(max * 1000 + 1500, 120_000);
-    return { type: 'wait', ms, reason: `countdown (${max}s)`, requiredMs: max * 1000 };
+    const confirmed = active.filter((c) => c.hasUnit || (previous?.has(c.key) && previous.get(c.key)! > c.value));
+    if (confirmed.length > 0) {
+      const max = Math.max(...confirmed.map((c) => c.value));
+      return { type: 'wait', ms: Math.min(max * 1000 + 1500, 120_000), reason: `countdown (${max}s)`, requiredMs: max * 1000 };
+    }
+    if (previous && active.every((c) => previous.get(c.key) === c.value)) return null; // static numbers: not a timer
+    return { type: 'wait', ms: 2500, reason: 'possible countdown (verifying that it ticks)' };
   }
 
   private pickCandidate(snap: PageSnapshot): AgentAction | null {
@@ -1067,15 +1088,19 @@ export class ResolutionAgent {
 
   private async waitOnPage(ms: number, snap: PageSnapshot, reason: string, requiredMs: number): Promise<void> {
     const key = withoutHash(snap.url);
+    if (this.bestEvidence(0.85)) return; // the destination is already known
     const isCountdown = /countdown/i.test(reason);
+    // Only waits the page itself demands (countdowns) draw on MAX_COUNTDOWN_WAIT_MS; other waits are
+    // bounded per page and by the job deadline.
+    const charged = isCountdown || requiredMs > 0;
     const remainingBudget = this.maxCountdownWaitMs - this.countdownWaitUsed;
-    if (remainingBudget <= 0 || requiredMs > remainingBudget) {
+    if (requiredMs > 0 && requiredMs > remainingBudget) {
       this.fail(
         'COUNTDOWN_TOO_LONG',
         `The page requires waiting longer than the configured maximum (${Math.round(this.maxCountdownWaitMs / 1000)} s)`,
       );
     }
-    const budget = Math.min(ms, remainingBudget);
+    const budget = charged ? Math.min(ms, Math.max(remainingBudget, 0)) : ms;
     const watchIds = snap.candidates
       .filter((c) => c.disabled && c.score >= STRONG_THRESHOLD - 2)
       .map((c) => c.agentId)
@@ -1148,7 +1173,7 @@ export class ResolutionAgent {
     }
     const spent = Date.now() - start;
     this.waitedOnUrl.set(key, (this.waitedOnUrl.get(key) ?? 0) + spent);
-    this.countdownWaitUsed += spent;
+    if (charged) this.countdownWaitUsed += spent;
     if (outcome === 'timeout' && isCountdown) this.stalledCountdownUrls.add(key);
     this.record('wait-result', `${outcome} after ${spent} ms`);
   }

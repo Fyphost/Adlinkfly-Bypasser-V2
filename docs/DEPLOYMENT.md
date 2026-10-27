@@ -82,6 +82,13 @@ location / {
 
 Set `TRUST_PROXY_HOPS=1` so rate limiting and logs see the real client IP. Terminate TLS at the proxy and add HSTS there.
 
+## Defence in depth: network egress rules
+
+The built-in egress proxy enforces the SSRF policy for everything Chromium does through its network stack. Chromium's OS sandbox is off by default (`BROWSER_SANDBOX=false`) because most container runtimes need extra seccomp configuration for it. A compromised renderer could therefore bypass the proxy. For internet-facing deployments, add a network-level backstop:
+
+- block outbound traffic from the service to private and link-local ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`, `100.64.0.0/10`, `fc00::/7`, `fe80::/10`) and to your cloud metadata endpoint. Use Kubernetes `NetworkPolicy`, security groups, or `iptables`/`nftables` in the host's `DOCKER-USER` chain;
+- or enable `BROWSER_SANDBOX=true` where the runtime allows it: a non-root user with unprivileged user namespaces, for example with Chromium's seccomp profile or on a VM.
+
 ## Scaling
 
 - **Vertical.** Raise `MAX_CONCURRENT_JOBS` while watching CPU and memory (`resolver_browser_contexts_active`, container memory). `MAX_QUEUE_SIZE` and `QUEUE_TIMEOUT_MS` determine when the service starts shedding load with `503` and `Retry-After`.

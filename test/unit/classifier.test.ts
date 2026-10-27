@@ -38,6 +38,7 @@ function snapshot(p: SnapshotInput = {}): PageSnapshot {
       providers: [],
       visibleWidgets: [],
       invisibleBound: false,
+      scriptBound: false,
       cloudflareInterstitial: false,
       captchaInputs: 0,
       captchaImages: 0,
@@ -79,9 +80,14 @@ test('treats AdLinkFly CAPTCHA forms and invisible CAPTCHAs bound to the action 
       .blocking,
   );
   assert.ok(assessChallenge(snapshot({ markers: { linkViewForm: true }, challenge: { providers: ['solvemedia'] } })).blocking);
+  assert.ok(
+    assessChallenge(snapshot({ markers: { linkViewForm: true, captchaShortlink: true } })).blocking,
+    'a widget rendered into #captchaShortlink is a CAPTCHA even without a recognised provider',
+  );
+  assert.ok(assessChallenge(snapshot({ challenge: { scriptBound: true } })).blocking, 'script-rendered widget');
   assert.equal(
     assessChallenge(
-      snapshot({ markers: { linkViewForm: true, captchaShortlink: true }, candidates: [{ text: 'Click here to continue', score: 12 }] }),
+      snapshot({ markers: { linkViewForm: true, captchaShortlink: false }, candidates: [{ text: 'Click here to continue', score: 12 }] }),
     ).blocking,
     false,
     'CAPTCHA-free link-view step (CAPTCHA disabled by the operator) is a normal step',
@@ -132,7 +138,7 @@ test('scores intermediate blog pages above the threshold and plain destinations 
   const flow = { isShortenerHost: (h: string) => h === 'arolinks.com', isFlowHost: (h: string) => h === 'arolinks.com' };
   const blog = snapshot({
     text: 'Scroll down and click the Verify button. Please wait 10 seconds to get your link.',
-    countdowns: [{ key: 'a', value: 10, source: 'element' }],
+    countdowns: [{ key: 'a', value: 10, source: 'element', hasUnit: true }],
     candidates: [{ text: 'Verify', score: 9 }],
   });
   assert.ok(intermediateScore(blog, flow).score >= INTERMEDIATE_THRESHOLD);

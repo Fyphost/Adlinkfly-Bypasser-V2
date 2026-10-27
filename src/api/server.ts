@@ -278,14 +278,18 @@ export function createServer(deps: ServerDeps): ApiServer {
     let routeName = 'unmatched';
     let keyId: string | null = null;
 
-    res.on('finish', () => {
-      metrics.httpRequests.inc({ route: routeName, status: String(res.statusCode) });
+    // 'close' fires for completed and aborted exchanges alike, so client disconnects are logged too.
+    res.once('close', () => {
+      const completed = res.writableFinished;
+      const status = completed ? res.statusCode : 499;
+      metrics.httpRequests.inc({ route: routeName, status: String(status) });
       accessLog.info('request', {
         request_id: requestId,
         method,
         path: path.slice(0, 200),
         route: routeName,
-        status: res.statusCode,
+        status,
+        completed,
         ms: Date.now() - started,
         ip,
         key: keyId ?? undefined,
@@ -326,9 +330,14 @@ export function createServer(deps: ServerDeps): ApiServer {
     routeName = route.name;
     const match = route.pattern.exec(path)!;
     const params: Record<string, string> = {};
-    route.keys.forEach((k, i) => {
-      params[k] = decodeURIComponent(match[i + 1] ?? '');
-    });
+    try {
+      route.keys.forEach((k, i) => {
+        params[k] = decodeURIComponent(match[i + 1] ?? '');
+      });
+    } catch {
+      fail(new AppError('NOT_FOUND', { detail: 'Malformed path parameter' }));
+      return;
+    }
 
     if (route.auth) {
       if (!auth.disabled && authFailures.isExhausted(`ip:${ip}`)) {

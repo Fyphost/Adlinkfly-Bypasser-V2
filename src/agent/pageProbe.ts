@@ -231,22 +231,45 @@ export function pageProbe(opts: ProbeOptions): ProbeResult {
   // ---- Countdown detection -------------------------------------------------
   const countdowns: ProbeResult['countdowns'] = [];
   const UNIT = '(?:s\\b|sec\\b|secs\\b|seconds?|detik|segundos?|secondes?|sekunden|сек|सेकंड)';
-  const timerSel =
-    '[id*="timer" i],[class*="timer" i],[id*="countdown" i],[class*="countdown" i],[id*="counter" i],[class*="counter" i],[id*="count" i],[class*="count" i],[id*="second" i],[class*="second" i],[id*="wait" i],[class*="wait" i],[id*="clock" i]';
+  // Candidate timer elements are chosen by whole id/class tokens (not substrings: "account",
+  // "discount" or "post-views-count" must not look like countdowns).
+  const TIMER_TOKEN = /^(timers?|countdown\w*|counter|cdown|wait|waiting|waittime|seconds|secs|clock|ticker)$/;
+  const NOT_TIMER_TOKEN =
+    /^(views?|comments?|likes?|shares?|followers?|cart|badge|items?|downloads?|votes?|rating|stars?|price|visitors?|hits)$/;
+  const timerTokens = (el: Element): { timer: boolean; excluded: boolean } => {
+    const raw = `${el.id || ''} ${typeof el.className === 'string' ? el.className : ''}`.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase();
+    const tokens = raw.split(/[^a-z0-9]+/).filter(Boolean);
+    return {
+      timer: tokens.some((t) => TIMER_TOKEN.test(t)) || raw.includes('count-down'),
+      excluded: tokens.some((t) => NOT_TIMER_TOKEN.test(t)),
+    };
+  };
   let n = 0;
-  doc.querySelectorAll(timerSel).forEach((el) => {
-    if (n >= 40 || !isVisible(el)) return;
+  doc.querySelectorAll('[id], [class]').forEach((el) => {
+    if (n >= 40) return;
+    const tk = timerTokens(el);
+    if (!tk.timer || tk.excluded || !isVisible(el)) return;
     const t = norm((el as HTMLElement).innerText);
     if (!t || t.length > 60) return;
-    let m = /^(\d{1,4})$/.exec(t);
-    if (!m) m = new RegExp(`(\\d{1,4})\\s*${UNIT}`, 'i').exec(t);
-    if (!m) m = /^(\d{1,2}):(\d{2})$/.exec(t);
-    if (m) {
-      const value = m.length === 3 && t.includes(':') ? Number(m[1]) * 60 + Number(m[2]) : Number(m[1]);
+    let hasUnit = false;
+    let value: number | null = null;
+    const bare = /^(\d{1,4})$/.exec(t);
+    const unit = new RegExp(`(\\d{1,4})\\s*${UNIT}`, 'i').exec(t);
+    const clock = /^(\d{1,2}):(\d{2})$/.exec(t);
+    if (bare) value = Number(bare[1]);
+    else if (unit) {
+      value = Number(unit[1]);
+      hasUnit = true;
+    } else if (clock) {
+      value = Number(clock[1]) * 60 + Number(clock[2]);
+      hasUnit = true;
+    }
+    if (value !== null) {
       countdowns.push({
         key: `el:${el.id || (typeof el.className === 'string' ? el.className : '') || el.tagName}:${n}`,
         value,
         source: 'element',
+        hasUnit,
       });
       n++;
     }
@@ -260,7 +283,7 @@ export function pageProbe(opts: ProbeOptions): ProbeResult {
     let k = 0;
     let m: RegExpExecArray | null;
     while ((m = re.exec(sample)) && k < 5) {
-      countdowns.push({ key: `text:${pi}:${k}`, value: Number(m[1]), source: 'text' });
+      countdowns.push({ key: `text:${pi}:${k}`, value: Number(m[1]), source: 'text', hasUnit: true });
       k++;
     }
   });
@@ -317,6 +340,8 @@ export function pageProbe(opts: ProbeOptions): ProbeResult {
   const invisibleBound = !!doc.querySelector(
     'button.g-recaptcha, input.g-recaptcha, a.g-recaptcha, [data-sitekey][data-callback], .g-recaptcha[data-size="invisible"], button.h-captcha, [data-hcaptcha-widget-id]',
   );
+  // Widgets rendered from script (grecaptcha/hcaptcha/turnstile.render), tagged by the init-script hook.
+  const scriptBound = !!doc.querySelector('[data-agent-captcha-bound]');
   const title = doc.title || '';
   const cloudflareInterstitial =
     /^(just a moment|attention required|checking your browser|one more step|please wait\.\.\.)/i.test(title.trim()) ||
@@ -438,6 +463,7 @@ export function pageProbe(opts: ProbeOptions): ProbeResult {
       providers: Array.from(providers),
       visibleWidgets: Array.from(visibleWidgets),
       invisibleBound,
+      scriptBound,
       cloudflareInterstitial,
       captchaInputs,
       captchaImages,
@@ -448,7 +474,11 @@ export function pageProbe(opts: ProbeOptions): ProbeResult {
       goLinkAction: (doc.querySelector('form#go-link') as HTMLFormElement | null)?.action || null,
       linkViewForm: !!doc.querySelector('form#link-view'),
       adFormData: !!doc.querySelector('input[name="ad_form_data"]'),
-      captchaShortlink: !!doc.querySelector('#captchaShortlink, #invisibleCaptchaShortlink, .btn-captcha'),
+      // AdLinkFly renders its CAPTCHA widget into #captchaShortlink; an empty container means CAPTCHA is off.
+      captchaShortlink: (() => {
+        const box = doc.querySelector('#captchaShortlink');
+        return !!box && (box.children.length > 0 || (box.textContent || '').trim().length > 0);
+      })(),
       getLink,
       counterValue,
     },
@@ -491,18 +521,20 @@ export function waitProbe(args: { attr: string; ids: string[] }): {
     if (!disabled && r.width > 1 && r.height > 1) enabled.push(id);
   }
   const countdown: number[] = [];
-  document
-    .querySelectorAll(
-      '[id*="timer" i],[class*="timer" i],[id*="countdown" i],[class*="countdown" i],[id*="counter" i],[class*="counter" i],[id*="count" i],[class*="count" i],[id*="second" i],[class*="second" i],[id*="wait" i],[class*="wait" i],[id*="clock" i]',
-    )
-    .forEach((el) => {
-      if (countdown.length >= 10) return;
-      const r = el.getBoundingClientRect();
-      if (r.width < 1 || r.height < 1) return;
-      const t = ((el as HTMLElement).innerText || '').trim();
-      const m = /^(\d{1,4})\b/.exec(t) ?? /(\d{1,4})\s*(?:s\b|sec|secs|seconds?|detik|segundos?)/i.exec(t);
-      if (m && t.length < 60) countdown.push(Number(m[1]));
-    });
+  const TIMER_TOKEN = /^(timers?|countdown\w*|counter|cdown|wait|waiting|waittime|seconds|secs|clock|ticker)$/;
+  const NOT_TIMER_TOKEN =
+    /^(views?|comments?|likes?|shares?|followers?|cart|badge|items?|downloads?|votes?|rating|stars?|price|visitors?|hits)$/;
+  document.querySelectorAll('[id], [class]').forEach((el) => {
+    if (countdown.length >= 10) return;
+    const raw = `${el.id || ''} ${typeof el.className === 'string' ? el.className : ''}`.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase();
+    const tokens = raw.split(/[^a-z0-9]+/).filter(Boolean);
+    if (!(tokens.some((t) => TIMER_TOKEN.test(t)) || raw.includes('count-down')) || tokens.some((t) => NOT_TIMER_TOKEN.test(t))) return;
+    const r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return;
+    const t = ((el as HTMLElement).innerText || '').trim();
+    const m = /^(\d{1,4})\b/.exec(t) ?? /(\d{1,4})\s*(?:s\b|sec|secs|seconds?|detik|segundos?)/i.exec(t);
+    if (m && t.length < 60) countdown.push(Number(m[1]));
+  });
   const gl = document.querySelector('a.get-link, a#get-link, .get-link a, a.getlink, a#getlink') as HTMLAnchorElement | null;
   return {
     url: location.href,

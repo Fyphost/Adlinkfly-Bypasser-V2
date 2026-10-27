@@ -53,6 +53,12 @@ describe('human verification is reported, never bypassed', { concurrency: 3 }, (
     assert.equal(b.challenge_type, 'cloudflare_challenge');
   });
 
+  it('invisible CAPTCHA bound from script (grecaptcha.render) is detected and not clicked', async () => {
+    const b = await expectError('/scriptcaptcha', 422, 'HUMAN_VERIFICATION_REQUIRED');
+    assert.match(String(b.error), /CAPTCHA widget rendered/);
+    assert.equal(sites.hits.get('dest.test /scriptcaptcha-target') ?? 0, 0);
+  });
+
   it('"I\'m not a robot" button is never clicked', async () => {
     await expectError('/robot', 422, 'HUMAN_VERIFICATION_REQUIRED');
     assert.equal(sites.hits.get('dest.test /robot-target') ?? 0, 0);
@@ -94,6 +100,24 @@ describe('navigation safety', { concurrency: 4 }, () => {
     assert.match(String(b.error), /^Maximum navigation attempts exceeded/);
     assert.equal(b.message, 'Unable to resolve the destination URL');
   });
+  it('charges only page-demanded countdowns to MAX_COUNTDOWN_WAIT_MS', async () => {
+    const app = await startTestApp({ MAX_COUNTDOWN_WAIT_MS: '0' });
+    try {
+      // Non-countdown waits (disabled button, meta refresh) still work with a zero countdown budget …
+      for (const [path, target] of [
+        ['/disabled', '/disabled-target'],
+        ['/meta', '/meta-target'],
+      ] as const) {
+        const r = await postResolve(app.base, { url: sites.url('short.test', path) });
+        assert.equal(r.body.destination_url, sites.url('dest.test', target), JSON.stringify(r.body));
+      }
+      // … while a real countdown is refused.
+      await expectError('/c-budget', 504, 'COUNTDOWN_TOO_LONG', 'short.test', app);
+    } finally {
+      await app.close();
+    }
+  });
+
   it('refuses countdowns longer than the configured maximum', async () => {
     await expectError('/slow', 504, 'COUNTDOWN_TOO_LONG');
   });

@@ -125,6 +125,55 @@ test('enforces the per-session request budget and rejects closed sessions', asyn
   assert.equal((await viaProxy(`http://site.test:${upstreamPort}/4`, auth)).status, 407);
 });
 
+test('propagates an upstream reset mid-body instead of leaving the response hanging', async () => {
+  const broken = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-length': '1000', 'content-type': 'text/plain' });
+    res.write('partial-body!');
+    setTimeout(() => res.socket?.destroy(), 50);
+  });
+  await new Promise<void>((r) => broken.listen(0, '127.0.0.1', () => r()));
+  const port = (broken.address() as AddressInfo).port;
+  const s = proxy.createSession({ maxBytes: 1_000_000, maxRequests: 100 });
+  const p = new URL(proxy.url);
+  try {
+    const outcome = await new Promise<string>((resolve) => {
+      const timer = setTimeout(() => resolve('hung'), 3000);
+      const req = http.request(
+        {
+          host: p.hostname,
+          port: p.port,
+          path: `http://site.test:${port}/x`,
+          headers: { 'proxy-authorization': `Basic ${Buffer.from(`${s.username}:${s.password}`).toString('base64')}` },
+        },
+        (res) => {
+          res.on('data', () => undefined);
+          res.on('end', () => {
+            clearTimeout(timer);
+            resolve(res.complete ? 'complete' : 'aborted');
+          });
+          res.on('error', () => {
+            clearTimeout(timer);
+            resolve('aborted');
+          });
+          res.on('aborted', () => {
+            clearTimeout(timer);
+            resolve('aborted');
+          });
+        },
+      );
+      req.on('error', () => {
+        clearTimeout(timer);
+        resolve('aborted');
+      });
+      req.end();
+    });
+    assert.equal(outcome, 'aborted');
+  } finally {
+    proxy.closeSession(s);
+    broken.close();
+  }
+});
+
 test('establishes CONNECT tunnels to allowed destinations', async () => {
   const s = proxy.createSession({ maxBytes: 1_000_000, maxRequests: 100 });
   assert.match(await connectViaProxy(`site.test:${upstreamPort}`, `${s.username}:${s.password}`), /200 Connection Established/);

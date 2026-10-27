@@ -57,7 +57,7 @@ Configuration comes entirely from environment variables. At start-up the service
 | `NAVIGATION_TIMEOUT_MS` | `30000` | Page load timeout (must not exceed `JOB_TIMEOUT_MS`) |
 | `ACTION_TIMEOUT_MS` | `5000` | Click and other action timeout |
 | `MAX_STEPS` | `30` | Observe→act iterations per link before `MAX_STEPS_EXCEEDED` |
-| `MAX_COUNTDOWN_WAIT_MS` | `90000` | Total time a job may spend waiting (countdowns, disabled buttons, loading). A single countdown that needs more fails immediately with `COUNTDOWN_TOO_LONG`. |
+| `MAX_COUNTDOWN_WAIT_MS` | `90000` | Total time a job may spend on countdowns that the pages demand. A single countdown that needs more fails immediately with `COUNTDOWN_TOO_LONG`. Other waits (disabled buttons, loading, meta refresh) are bounded per page and by `JOB_TIMEOUT_MS`. |
 | `CHALLENGE_AUTO_WAIT_MS` | `8000` | Cloudflare-style interstitials sometimes clear on their own. The agent waits this long **without interacting**, then reports `HUMAN_VERIFICATION_REQUIRED`. `0` disables the wait. |
 | `MAX_CHAIN_DEPTH` | `2` | How many further supported short links to follow when a destination is itself a short link |
 | `SETTLE_MS` | `2500` | How long to watch for navigation after a click |
@@ -71,7 +71,7 @@ Configuration comes entirely from environment variables. At start-up the service
 | --- | --- | --- |
 | `BROWSER_HEADLESS` | `true` | Headless mode. Headed mode needs the full Chromium build and a display. |
 | `BROWSER_EXECUTABLE_PATH` | | Use a specific Chromium binary instead of Playwright's |
-| `BROWSER_SANDBOX` | `false` | Enable Chromium's OS sandbox. Recommended when the host allows it (non-root user with user namespaces). In containers this usually needs a custom seccomp profile. |
+| `BROWSER_SANDBOX` | `false` | Enable Chromium's OS sandbox. Recommended when the host allows it (non-root user with user namespaces). In containers this usually needs a custom seccomp profile. While it is off, also apply the [network egress rules](DEPLOYMENT.md#defence-in-depth-network-egress-rules). |
 | `BROWSER_RECYCLE_AFTER_JOBS` | `100` | Replace the browser process after this many jobs, to bound memory |
 | `BROWSER_LAUNCH_TIMEOUT_MS` | `30000` | Browser start timeout |
 | `USER_AGENT` | *(Chromium default)* | Override the User-Agent |

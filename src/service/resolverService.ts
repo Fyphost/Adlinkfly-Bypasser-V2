@@ -60,6 +60,9 @@ interface Inflight {
   promise: Promise<ResolveSuccess>;
   controller: AbortController;
   waiters: number;
+  started: boolean;
+  /** onStart callbacks of every joined caller, fired when the shared job leaves the queue. */
+  starters: Array<() => void>;
 }
 
 export class ResolverService {
@@ -155,17 +158,27 @@ export class ResolverService {
     if (opts.includeTrace) return this.enqueue(url, module, opts.signal, true, log, opts.onStart);
     let entry = this.inflight.get(key);
     if (!entry) {
-      const controller = new AbortController();
-      const starters: Array<() => void> = [];
-      if (opts.onStart) starters.push(opts.onStart);
-      const promise = this.enqueue(url, module, controller.signal, false, log, () => starters.forEach((s) => s())).finally(() => {
-        if (this.inflight.get(key) === entry) this.inflight.delete(key);
+      const created: Inflight = {
+        promise: Promise.resolve() as unknown as Promise<ResolveSuccess>,
+        controller: new AbortController(),
+        waiters: 0,
+        started: false,
+        starters: [],
+      };
+      created.promise = this.enqueue(url, module, created.controller.signal, false, log, () => {
+        created.started = true;
+        for (const s of created.starters.splice(0)) s();
+      }).finally(() => {
+        if (this.inflight.get(key) === created) this.inflight.delete(key);
       });
-      entry = { promise, controller, waiters: 0 };
+      entry = created;
       this.inflight.set(key, entry);
     } else {
       log.debug('joined in-flight resolution', { shortener: module.id });
-      opts.onStart?.();
+    }
+    if (opts.onStart) {
+      if (entry.started) opts.onStart();
+      else entry.starters.push(opts.onStart);
     }
     const shared = entry;
     shared.waiters++;
@@ -294,7 +307,9 @@ export class ResolverService {
         destinationDenylist: cfg.network.destinationDenylist,
         isFlowHost: (h) => flowHosts.has(h) || ShortenerRegistry.ownsHost(module, h),
         httpClient: this.d.httpClient,
+        signal,
       });
+      if (signal.aborted) throw isAppError(signal.reason) ? signal.reason : new AppError('CANCELLED');
       const next = new URL(finalized.url);
       const nextModule = this.d.registry.isKnownShortenerHost(next.hostname) ? this.d.registry.match(next) : null;
       if (nextModule && depth < cfg.agent.maxChainDepth && finalized.url !== current.href) {

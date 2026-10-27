@@ -43,6 +43,8 @@ export interface CountdownReading {
   key: string;
   value: number;
   source: 'element' | 'text';
+  /** The reading carried a time unit or wait context ("10 seconds", "0:30", "wait 5s"). */
+  hasUnit: boolean;
 }
 
 export interface IframeInfo {
@@ -57,6 +59,8 @@ export interface ChallengeSignals {
   providers: string[];
   visibleWidgets: string[];
   invisibleBound: boolean;
+  /** A widget was rendered from script via grecaptcha/hcaptcha/turnstile.render (init-script hook). */
+  scriptBound: boolean;
   cloudflareInterstitial: boolean;
   captchaInputs: number;
   captchaImages: number;

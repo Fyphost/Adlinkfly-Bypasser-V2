@@ -92,6 +92,16 @@ test('follows redirector hops over SSRF-safe HTTP without requesting the final d
     });
     const r2 = await followRedirectors(`http://redir.test:${port}/a`, blocked, { maxHops: 5, isRedirector: () => true });
     assert.equal(r2.url, `http://redir.test:${port}/a`, 'private redirector address must not be contacted');
+    seen.length = 0;
+    const aborted = new AbortController();
+    aborted.abort();
+    const r3 = await followRedirectors(`http://redir.test:${port}/a`, client, {
+      maxHops: 5,
+      isRedirector: (h) => h === 'redir.test',
+      signal: aborted.signal,
+    });
+    assert.equal(r3.url, `http://redir.test:${port}/a`);
+    assert.equal(seen.length, 0, 'an aborted job makes no further requests');
   } finally {
     server.close();
   }

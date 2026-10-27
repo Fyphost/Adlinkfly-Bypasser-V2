@@ -149,6 +149,16 @@ describe('page state detection', () => {
     assert.ok(values.includes(12), JSON.stringify(values));
   });
 
+  it('ignores counters that are not timers (views, comments, discounts, accounts)', async () => {
+    const { probe } = await analyse(`<span class="post-views-count">1240</span><span class="comment-count">12</span>
+      <span class="discount">30</span><div id="account">5</div><span id="timer">9</span>`);
+    assert.deepEqual(
+      probe.countdowns.map((c) => c.value),
+      [9],
+    );
+    assert.equal(probe.countdowns[0]!.hasUnit, false, 'a bare number still needs to be seen ticking');
+  });
+
   it('detects meta refresh targets', async () => {
     const { probe } = await analyse(`<meta http-equiv="refresh" content="3; url=https://next.example/step">`);
     assert.deepEqual(probe.metaRefresh, { delay: 3, url: 'https://next.example/step' });

@@ -57,12 +57,14 @@ export function adlinkflyDecide(snap: PageSnapshot, ctx: ModuleContext): ModuleD
   }
 
   if (m.goLinkForm) {
+    // The platform's own configured counter (app_vars.counter_value) is authoritative; visible timer
+    // readings are only a fallback for themes that do not expose it.
     const fromTimers = snap.countdowns.reduce((mx, c) => Math.max(mx, c.value), 0);
-    const counter = Math.max(m.counterValue ?? 0, fromTimers);
+    const counter = Math.min(m.counterValue ?? fromTimers, 900);
     return {
       type: 'wait',
       reason: 'waiting for the AdLinkFly countdown to release the destination link',
-      maxMs: (Math.min(counter, 900) + 20) * 1000,
+      maxMs: (counter + 20) * 1000,
       requiredMs: counter * 1000,
     };
   }
