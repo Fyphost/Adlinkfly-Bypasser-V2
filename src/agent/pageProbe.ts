@@ -359,6 +359,25 @@ export function pageProbe(opts: ProbeOptions): ProbeResult {
   doc.querySelectorAll('img[src*="captcha" i], img[alt*="captcha" i], img[id*="captcha" i]').forEach((el) => {
     if (isVisible(el)) captchaImages++;
   });
+  // Extract the public site key / action so an optional solver can request a token. The init-script
+  // render hook records these onto the container as data-agent-* attributes for script-rendered
+  // widgets; explicitly declared widgets carry the standard data-sitekey / data-pkey attributes.
+  let sitekey: string | undefined;
+  let captchaAction: string | undefined;
+  let captchaInvisible = invisibleBound;
+  const keyEl = doc.querySelector(
+    '[data-agent-sitekey], .g-recaptcha[data-sitekey], .h-captcha[data-sitekey], .cf-turnstile[data-sitekey], [data-sitekey], [data-pkey]',
+  );
+  if (keyEl) {
+    const sk = keyEl.getAttribute('data-agent-sitekey') || keyEl.getAttribute('data-sitekey') || keyEl.getAttribute('data-pkey');
+    if (sk) sitekey = sk.trim().slice(0, 200);
+    const act = keyEl.getAttribute('data-agent-captcha-action') || keyEl.getAttribute('data-action');
+    if (act) captchaAction = act.trim().slice(0, 100);
+    if (keyEl.getAttribute('data-size') === 'invisible' || keyEl.getAttribute('data-agent-captcha-size') === 'invisible') {
+      captchaInvisible = true;
+    }
+  }
+
   const lower = bodyText.toLowerCase().slice(0, 8000);
   const CUES = [
     'verify you are human',
@@ -468,6 +487,9 @@ export function pageProbe(opts: ProbeOptions): ProbeResult {
       captchaInputs,
       captchaImages,
       textCues,
+      sitekey,
+      captchaAction,
+      captchaInvisible,
     },
     markers: {
       goLinkForm: !!doc.querySelector('form#go-link'),

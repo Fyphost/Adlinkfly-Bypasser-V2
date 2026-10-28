@@ -121,3 +121,20 @@ Off by default. When enabled, the model is consulted only when the heuristics fi
 | `AI_JSON_MODE` | `true` | Send `response_format: json_object` (turn off for servers that reject it) |
 
 The model receives the page URL, title, a text excerpt of up to 1,500 characters, and a list of interactive elements. Page content goes to the provider you configure.
+
+## CAPTCHA solver (optional)
+
+Off by default. By design the agent **detects and reports** CAPTCHAs (returning `HUMAN_VERIFICATION_REQUIRED`) rather than solving them. When a provider is configured, a page gated by a supported widget (reCAPTCHA v2/v3, hCaptcha, Cloudflare Turnstile) with an extractable site key is sent to an external solving service; the returned token is injected and the flow continues. On any failure the agent falls back to the original report-and-stop behaviour.
+
+> **Caveats.** Automating CAPTCHA solving may violate the terms of service of the target sites and of the CAPTCHA providers. Enable this only where you are authorised to do so. Solver tokens are produced from the provider's own IP (proxyless), which some sites reject. Outbound calls to the solver bypass the browser and the SSRF/egress policy, so point `CAPTCHA_BASE_URL` only at a trusted provider host. Solves cost money and add latency — size `CAPTCHA_TIMEOUT_MS` below `JOB_TIMEOUT_MS`.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `CAPTCHA_PROVIDER` | `none` | `none` keeps report-and-stop. `2captcha` (api.2captcha.com) or `capsolver` (api.capsolver.com) enable solving via their create-task/poll JSON API. |
+| `CAPTCHA_API_KEY` | | Provider API key (required when enabled) |
+| `CAPTCHA_BASE_URL` | *(per provider)* | Provider API base URL. Defaults: `https://api.2captcha.com` / `https://api.capsolver.com`. |
+| `CAPTCHA_TIMEOUT_MS` | `120000` | Maximum time for one solve (must not exceed `JOB_TIMEOUT_MS`) |
+| `CAPTCHA_POLL_INTERVAL_MS` | `5000` | How often the task result is polled |
+| `CAPTCHA_MAX_SOLVES_PER_JOB` | `0` | Solves allowed per resolution (shared across chained links). `0` disables the solver. |
+
+The solver receives only the widget's public site key, the page URL and (for reCAPTCHA v3) the action. See [docs/CAPTCHA_SOLVER.md](CAPTCHA_SOLVER.md) for the design and extension points.

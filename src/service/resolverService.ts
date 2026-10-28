@@ -16,6 +16,7 @@ import { ShortenerRegistry } from '../shorteners/registry.ts';
 import type { ShortenerModule } from '../shorteners/types.ts';
 import { ResolutionAgent } from '../agent/agent.ts';
 import type { AiAdvisor } from '../agent/aiAdvisor.ts';
+import type { CaptchaSolver } from '../agent/captchaSolver.ts';
 import type { TraceStep } from '../agent/types.ts';
 import { finalizeDestination } from '../extraction/destination.ts';
 import type { SafeHttpClient } from '../extraction/redirectFollower.ts';
@@ -51,6 +52,7 @@ export interface ResolverServiceDeps {
   browsers: BrowserManager;
   queue: JobQueue;
   advisor: AiAdvisor;
+  captchaSolver: CaptchaSolver;
   httpClient: SafeHttpClient;
   logger: Logger;
   metrics: Metrics;
@@ -271,6 +273,8 @@ export class ResolverService {
     const started = Date.now();
     const cfg = this.d.config;
     const aiCalls = { count: 0 };
+    // Budgets shared across every hop of a chained resolution.
+    const captchaSolves = { count: 0 };
     const chain: string[] = [];
     const trace: TraceStep[] = [];
     let current = startUrl;
@@ -287,6 +291,9 @@ export class ResolverService {
         signal,
         aiMaxCalls: cfg.ai.maxCallsPerJob,
         aiCallsUsed: aiCalls,
+        solver: this.d.captchaSolver,
+        captchaMaxSolves: cfg.captcha.maxSolvesPerJob,
+        captchaSolvesUsed: captchaSolves,
       });
       let result;
       try {

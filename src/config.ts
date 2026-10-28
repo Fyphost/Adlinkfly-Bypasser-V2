@@ -9,6 +9,7 @@ import { parseCidr } from './security/ip.ts';
 
 export type UrlLogMode = 'full' | 'host' | 'none';
 export type AiProvider = 'none' | 'openai' | 'anthropic';
+export type CaptchaProvider = 'none' | '2captcha' | 'capsolver';
 
 export interface ApiKeyEntry {
   /** Non-secret identifier used in logs and job ownership checks. */
@@ -83,7 +84,26 @@ export interface AppConfig {
     maxCallsPerJob: number;
     jsonMode: boolean;
   };
+  captcha: {
+    provider: CaptchaProvider;
+    apiKey: string | undefined;
+    baseUrl: string;
+    timeoutMs: number;
+    pollIntervalMs: number;
+    maxSolvesPerJob: number;
+  };
   metrics: { enabled: boolean; requireAuth: boolean };
+}
+
+function defaultCaptchaBaseUrl(provider: CaptchaProvider): string {
+  switch (provider) {
+    case 'capsolver':
+      return 'https://api.capsolver.com';
+    case '2captcha':
+      return 'https://api.2captcha.com';
+    default:
+      return '';
+  }
 }
 
 export class ConfigError extends Error {
@@ -255,6 +275,18 @@ export function loadConfig(env: Env = process.env): AppConfig {
     }
   }
 
+  const captchaProvider = r.oneOf<CaptchaProvider>('CAPTCHA_PROVIDER', 'none', ['none', '2captcha', 'capsolver']);
+  const captchaApiKey = r.optStr('CAPTCHA_API_KEY');
+  const captchaBaseUrl = r.str('CAPTCHA_BASE_URL', defaultCaptchaBaseUrl(captchaProvider));
+  if (captchaProvider !== 'none') {
+    try {
+      const u = new URL(captchaBaseUrl);
+      if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new Error('protocol');
+    } catch {
+      r.problems.push(`CAPTCHA_BASE_URL is not a valid http(s) URL ("${captchaBaseUrl}")`);
+    }
+  }
+
   const userAgent = r.optStr('USER_AGENT');
   const blockResourceTypes = r.list('BLOCK_RESOURCE_TYPES', ['media', 'font']).map((s) => s.toLowerCase());
   const validTypes = ['image', 'media', 'font', 'stylesheet', 'texttrack', 'eventsource', 'websocket', 'manifest', 'other'];
@@ -347,6 +379,14 @@ export function loadConfig(env: Env = process.env): AppConfig {
       maxCallsPerJob: r.int('AI_MAX_CALLS_PER_JOB', 4, 0, 50),
       jsonMode: r.bool('AI_JSON_MODE', true),
     },
+    captcha: {
+      provider: captchaProvider,
+      apiKey: captchaApiKey,
+      baseUrl: captchaBaseUrl.replace(/\/+$/, ''),
+      timeoutMs: r.int('CAPTCHA_TIMEOUT_MS', 120_000, 1_000, 300_000),
+      pollIntervalMs: r.int('CAPTCHA_POLL_INTERVAL_MS', 5_000, 500, 30_000),
+      maxSolvesPerJob: r.int('CAPTCHA_MAX_SOLVES_PER_JOB', 0, 0, 20),
+    },
     metrics: {
       enabled: r.bool('METRICS_ENABLED', true),
       requireAuth: r.bool('METRICS_REQUIRE_AUTH', true),
@@ -355,6 +395,15 @@ export function loadConfig(env: Env = process.env): AppConfig {
 
   if (aiProvider !== 'none' && !aiApiKey && !/^https?:\/\/(localhost|127\.0\.0\.1)/.test(aiBaseUrl)) {
     r.problems.push('AI_API_KEY is required when AI_PROVIDER is enabled');
+  }
+  if (captchaProvider !== 'none') {
+    if (!captchaApiKey) r.problems.push('CAPTCHA_API_KEY is required when CAPTCHA_PROVIDER is enabled');
+    if (config.captcha.maxSolvesPerJob === 0) {
+      r.problems.push('CAPTCHA_MAX_SOLVES_PER_JOB must be greater than 0 to enable the CAPTCHA solver');
+    }
+    if (config.captcha.timeoutMs > config.agent.jobTimeoutMs) {
+      r.problems.push('CAPTCHA_TIMEOUT_MS must not exceed JOB_TIMEOUT_MS (the solve would outlive the job)');
+    }
   }
   if (config.agent.navigationTimeoutMs > config.agent.jobTimeoutMs) {
     r.problems.push('NAVIGATION_TIMEOUT_MS must not exceed JOB_TIMEOUT_MS');

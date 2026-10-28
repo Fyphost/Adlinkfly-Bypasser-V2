@@ -15,11 +15,20 @@ export function captchaRenderHook(): void {
   const MARK = '__agentRenderHooked';
   const w = window as unknown as Record<string, unknown>;
 
-  const tag = (container: unknown): void => {
+  const tag = (container: unknown, params?: unknown): void => {
     try {
       const el = typeof container === 'string' ? document.getElementById(container) : container;
-      if (el && typeof (el as Element).setAttribute === 'function') (el as Element).setAttribute(ATTR, '1');
-      else document.documentElement.setAttribute(ATTR, '1');
+      const target = el && typeof (el as Element).setAttribute === 'function' ? (el as Element) : document.documentElement;
+      target.setAttribute(ATTR, '1');
+      // Record the public parameters (site key, action, size) so the page probe can read them
+      // without us ever altering the widget's behaviour.
+      if (params && typeof params === 'object') {
+        const p = params as Record<string, unknown>;
+        const sitekey = p.sitekey ?? p.siteKey ?? p.sitekeyv2;
+        if (typeof sitekey === 'string') target.setAttribute('data-agent-sitekey', sitekey);
+        if (typeof p.action === 'string') target.setAttribute('data-agent-captcha-action', p.action);
+        if (p.size === 'invisible') target.setAttribute('data-agent-captcha-size', 'invisible');
+      }
     } catch {
       /* never interfere with the page */
     }
@@ -29,7 +38,7 @@ export function captchaRenderHook(): void {
     if (typeof fn !== 'function' || (fn as unknown as Record<string, unknown>)[MARK]) return fn;
     const original = fn as (...args: unknown[]) => unknown;
     const wrapped = function (this: unknown, ...args: unknown[]) {
-      tag(args[0]);
+      tag(args[0], args[1]);
       return original.apply(this, args);
     };
     (wrapped as unknown as Record<string, unknown>)[MARK] = true;

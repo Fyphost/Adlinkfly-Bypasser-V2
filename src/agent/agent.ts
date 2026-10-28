@@ -36,6 +36,8 @@ import {
 import { INTERMEDIATE_THRESHOLD, assessChallenge, detectErrorPage, intermediateScore, looksLoading } from './classifier.ts';
 import { isAdHost } from '../browser/adDomains.ts';
 import type { AiAdvisor, AiAdvisorInput } from './aiAdvisor.ts';
+import type { CaptchaKind, CaptchaSolver, CaptchaTask } from './captchaSolver.ts';
+import type { ChallengeAssessment } from './classifier.ts';
 
 export interface DestinationEvidence {
   url: string;
@@ -66,6 +68,11 @@ export interface AgentOptions {
   /** Maximum advisor calls for the whole job (shared across chained resolutions). */
   aiMaxCalls: number;
   aiCallsUsed?: { count: number };
+  /** Optional CAPTCHA-solving tool (disabled no-op by default). */
+  solver: CaptchaSolver;
+  /** Maximum CAPTCHA solves for the whole job (shared across chained resolutions). */
+  captchaMaxSolves: number;
+  captchaSolvesUsed?: { count: number };
 }
 
 const MAX_TRACE = 120;
@@ -110,6 +117,11 @@ export class ResolutionAgent {
   private readonly maxCountdownWaitMs: number;
   private readonly aiCalls: { count: number };
   private readonly aiMaxCalls: number;
+  private readonly solver: CaptchaSolver;
+  private readonly captchaSolves: { count: number };
+  private readonly captchaMaxSolves: number;
+  /** Page URLs where a CAPTCHA token was already injected (so the flow proceeds instead of re-solving). */
+  private readonly captchaSolvedUrls = new Set<string>();
 
   private page!: Page;
   private navStartedAt = 0;
@@ -163,6 +175,9 @@ export class ResolutionAgent {
     this.maxCountdownWaitMs = options.module.limits?.maxCountdownWaitMs ?? options.agent.maxCountdownWaitMs;
     this.aiCalls = options.aiCallsUsed ?? { count: 0 };
     this.aiMaxCalls = options.aiMaxCalls;
+    this.solver = options.solver;
+    this.captchaSolves = options.captchaSolvesUsed ?? { count: 0 };
+    this.captchaMaxSolves = options.captchaMaxSolves;
   }
 
   // ---------------------------------------------------------------- helpers
@@ -635,6 +650,9 @@ export class ResolutionAgent {
       challenge.captchaInputs += r.challenge.captchaInputs;
       challenge.captchaImages += r.challenge.captchaImages;
       challenge.textCues = [...new Set([...challenge.textCues, ...r.challenge.textCues])];
+      challenge.sitekey ??= r.challenge.sitekey;
+      challenge.captchaAction ??= r.challenge.captchaAction;
+      challenge.captchaInvisible ||= r.challenge.captchaInvisible;
     }
     this.lastTitle = main.title;
     return {
@@ -684,11 +702,21 @@ export class ResolutionAgent {
           await this.waitForInterstitial(snap);
           continue;
         }
-        this.record('human-verification', challenge.reason);
-        this.fail('HUMAN_VERIFICATION_REQUIRED', `Human verification is required: ${challenge.reason}`, {
-          verification_url: snap.url,
-          challenge_type: challenge.type,
-        });
+        const solvedKey = withoutHash(snap.url);
+        if (this.captchaSolvedUrls.has(solvedKey)) {
+          // A token was already injected for this page: fall through and let the normal flow
+          // (countdown wait / clicking the now-unlocked button) continue instead of re-solving.
+          this.record('captcha-proceed', 'token already injected; continuing the flow');
+        } else if (await this.trySolveChallenge(snap, challenge)) {
+          this.captchaSolvedUrls.add(solvedKey);
+          continue;
+        } else {
+          this.record('human-verification', challenge.reason);
+          this.fail('HUMAN_VERIFICATION_REQUIRED', `Human verification is required: ${challenge.reason}`, {
+            verification_url: snap.url,
+            challenge_type: challenge.type,
+          });
+        }
       }
 
       if (!isHttpUrl(snap.url)) {
@@ -1189,6 +1217,104 @@ export class ResolutionAgent {
     }
     this.challengeWaitUsed += Date.now() - start;
     await settle(this.page.waitForLoadState('domcontentloaded', { timeout: 5000 }));
+  }
+
+  // --------------------------------------------------------------- captcha
+
+  /**
+   * Optional CAPTCHA solving. When a solver is configured and the challenge is a
+   * supported widget with a known site key, request a token, inject it, and let
+   * the loop re-observe so the (now unlocked) flow button can be clicked. Returns
+   * false on any miss so the caller falls back to HUMAN_VERIFICATION_REQUIRED.
+   */
+  private async trySolveChallenge(snap: PageSnapshot, challenge: ChallengeAssessment): Promise<boolean> {
+    if (!this.solver.enabled || this.captchaSolves.count >= this.captchaMaxSolves) return false;
+    const task = this.captchaTaskFromSnapshot(snap, challenge);
+    if (!task) return false;
+    this.captchaSolves.count++;
+    this.record('captcha-solve-attempt', `${task.kind} (${challenge.reason})`);
+    const solution = await this.solver.solve(task, this.signal);
+    this.throwIfAborted();
+    if (!solution) {
+      this.record('captcha-solve-failed', task.kind);
+      return false;
+    }
+    const injected = await this.injectCaptchaToken(solution.token);
+    if (!injected) {
+      this.record('captcha-inject-failed', task.kind);
+      return false;
+    }
+    this.record('captcha-solved', task.kind);
+    await this.wait(600);
+    return true;
+  }
+
+  /** Builds a solver task from the challenge signals, or null when it is not solvable this way. */
+  private captchaTaskFromSnapshot(snap: PageSnapshot, challenge: ChallengeAssessment): CaptchaTask | null {
+    const c = snap.challenge;
+    if (!c.sitekey || !isHttpUrl(snap.url)) return null;
+    // Cloudflare's managed interstitial is handled by waiting, not by a site-key solve.
+    if (challenge.type === 'cloudflare_challenge') return null;
+    const providers = c.providers;
+    let kind: CaptchaKind | null = null;
+    if (providers.includes('hcaptcha')) kind = 'hcaptcha';
+    else if (providers.includes('turnstile')) kind = 'turnstile';
+    else if (providers.includes('recaptcha')) kind = c.captchaAction || c.captchaInvisible ? 'recaptcha-v3' : 'recaptcha-v2';
+    if (!kind) return null;
+    return {
+      kind,
+      sitekey: c.sitekey,
+      pageUrl: snap.url,
+      action: c.captchaAction,
+      invisible: c.captchaInvisible,
+    };
+  }
+
+  /**
+   * Places the solved token into the standard response fields and invokes any
+   * registered success callback, across the main frame and same-flow frames.
+   */
+  private async injectCaptchaToken(token: string): Promise<boolean> {
+    let injected = false;
+    for (const frame of this.selectFrames()) {
+      try {
+        const ok = await withTimeout(
+          frame.evaluate((tok: string) => {
+            let done = false;
+            const names = ['g-recaptcha-response', 'h-captcha-response', 'cf-turnstile-response'];
+            for (const name of names) {
+              document.querySelectorAll(`textarea[name="${name}"], textarea#${name}`).forEach((el) => {
+                const ta = el as HTMLTextAreaElement;
+                ta.value = tok;
+                (ta.style as CSSStyleDeclaration).display = '';
+                ta.dispatchEvent(new Event('input', { bubbles: true }));
+                ta.dispatchEvent(new Event('change', { bubbles: true }));
+                done = true;
+              });
+            }
+            // Fire explicit data-callback handlers (invisible / bound widgets rely on these).
+            document.querySelectorAll('[data-callback]').forEach((el) => {
+              const name = el.getAttribute('data-callback');
+              const fn = name ? (window as unknown as Record<string, unknown>)[name] : undefined;
+              if (typeof fn === 'function') {
+                try {
+                  (fn as (t: string) => void)(tok);
+                  done = true;
+                } catch {
+                  /* ignore a throwing site callback */
+                }
+              }
+            });
+            return done;
+          }, token),
+          5000,
+        );
+        injected = injected || ok === true;
+      } catch {
+        /* frame detached or evaluation failed: try the next frame */
+      }
+    }
+    return injected;
   }
 
   // ------------------------------------------------------------------- done

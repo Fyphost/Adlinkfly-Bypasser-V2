@@ -17,6 +17,7 @@ import { JobQueue } from './queue/jobQueue.ts';
 import { buildRegistry, type ShortenerRegistry } from './shorteners/registry.ts';
 import type { ShortenerModule } from './shorteners/types.ts';
 import { createAdvisor } from './agent/aiAdvisor.ts';
+import { createCaptchaSolver } from './agent/captchaSolver.ts';
 import { SafeHttpClient } from './extraction/redirectFollower.ts';
 import { ResolverService } from './service/resolverService.ts';
 import { JobStore } from './service/jobStore.ts';
@@ -27,6 +28,7 @@ export interface AppOverrides {
   logger?: Logger;
   lookupAll?: LookupAllFn;
   aiFetch?: typeof fetch;
+  captchaFetch?: typeof fetch;
   browserType?: BrowserType;
   extraModules?: ShortenerModule[];
   /** Launch the browser lazily on first use instead of at start-up. */
@@ -84,13 +86,32 @@ export async function createApp(config: AppConfig, overrides: AppOverrides = {})
   });
   const registry = buildRegistry(config.shorteners, overrides.extraModules);
   const advisor = createAdvisor(config.ai, logger, overrides.aiFetch);
+  const captchaSolver = createCaptchaSolver(config.captcha, logger, overrides.captchaFetch);
+  if (captchaSolver.enabled) {
+    logger.warn('automatic CAPTCHA solving is ENABLED; ensure this is permitted for the sites you resolve', {
+      provider: config.captcha.provider,
+      max_solves_per_job: config.captcha.maxSolvesPerJob,
+    });
+  }
   const httpClient = new SafeHttpClient({ resolver, policy, userAgent: config.browser.userAgent });
   const queue = new JobQueue({
     concurrency: config.queue.concurrency,
     maxSize: config.queue.maxSize,
     queueTimeoutMs: config.queue.queueTimeoutMs,
   });
-  const service = new ResolverService({ config, policy, resolver, registry, browsers, queue, advisor, httpClient, logger, metrics });
+  const service = new ResolverService({
+    config,
+    policy,
+    resolver,
+    registry,
+    browsers,
+    queue,
+    advisor,
+    captchaSolver,
+    httpClient,
+    logger,
+    metrics,
+  });
   const jobs = new JobStore(config.queue.maxAsyncJobs, config.queue.asyncJobTtlMs);
 
   metrics.gauge('resolver_queue_active_jobs', 'Jobs currently running', () => queue.stats().active);

@@ -65,6 +65,12 @@ export interface ChallengeSignals {
   captchaInputs: number;
   captchaImages: number;
   textCues: string[];
+  /** Public site key of the challenge widget, when it could be extracted (for an optional solver). */
+  sitekey?: string;
+  /** reCAPTCHA v3 action associated with the widget, when known. */
+  captchaAction?: string;
+  /** The widget is invisible / bound to an action control rather than shown inline. */
+  captchaInvisible?: boolean;
 }
 
 export interface GetLinkMarker {
