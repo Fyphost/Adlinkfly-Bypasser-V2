@@ -9,7 +9,7 @@ import { parseCidr } from './security/ip.ts';
 
 export type UrlLogMode = 'full' | 'host' | 'none';
 export type AiProvider = 'none' | 'openai' | 'anthropic';
-export type CaptchaProvider = 'none' | '2captcha' | 'capsolver';
+export type CaptchaProvider = 'none' | '2captcha' | 'capsolver' | 'capskip';
 
 export interface ApiKeyEntry {
   /** Non-secret identifier used in logs and job ownership checks. */
@@ -101,6 +101,9 @@ function defaultCaptchaBaseUrl(provider: CaptchaProvider): string {
       return 'https://api.capsolver.com';
     case '2captcha':
       return 'https://api.2captcha.com';
+    case 'capskip':
+      // CapSkip is a local solver exposing the classic 2captcha in.php/res.php API.
+      return 'http://127.0.0.1:8080';
     default:
       return '';
   }
@@ -275,7 +278,7 @@ export function loadConfig(env: Env = process.env): AppConfig {
     }
   }
 
-  const captchaProvider = r.oneOf<CaptchaProvider>('CAPTCHA_PROVIDER', 'none', ['none', '2captcha', 'capsolver']);
+  const captchaProvider = r.oneOf<CaptchaProvider>('CAPTCHA_PROVIDER', 'none', ['none', '2captcha', 'capsolver', 'capskip']);
   const captchaApiKey = r.optStr('CAPTCHA_API_KEY');
   const captchaBaseUrl = r.str('CAPTCHA_BASE_URL', defaultCaptchaBaseUrl(captchaProvider));
   if (captchaProvider !== 'none') {
@@ -397,7 +400,10 @@ export function loadConfig(env: Env = process.env): AppConfig {
     r.problems.push('AI_API_KEY is required when AI_PROVIDER is enabled');
   }
   if (captchaProvider !== 'none') {
-    if (!captchaApiKey) r.problems.push('CAPTCHA_API_KEY is required when CAPTCHA_PROVIDER is enabled');
+    // CapSkip is a local service and does not require a cloud API key.
+    if (!captchaApiKey && captchaProvider !== 'capskip') {
+      r.problems.push('CAPTCHA_API_KEY is required when CAPTCHA_PROVIDER is a hosted service (2captcha, capsolver)');
+    }
     if (config.captcha.maxSolvesPerJob === 0) {
       r.problems.push('CAPTCHA_MAX_SOLVES_PER_JOB must be greater than 0 to enable the CAPTCHA solver');
     }

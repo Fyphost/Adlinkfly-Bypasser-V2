@@ -7,13 +7,22 @@ existing patterns so the addition stays consistent with the rest of the service.
 > **Status: implemented (disabled by default).** The tool described below now
 > ships in the codebase and is enabled via `CAPTCHA_PROVIDER` (see
 > [docs/CONFIGURATION.md](CONFIGURATION.md#captcha-solver-optional)). Supported
-> backends: **2captcha** and **CapSolver**. Supported challenge families:
-> reCAPTCHA v2/v3, hCaptcha, Cloudflare Turnstile (widget with an extractable
-> site key). The relevant code: `src/agent/captchaSolver.ts` (the service),
-> site‑key capture in `src/agent/pageProbe.ts` + `src/browser/initScripts.ts`,
-> the solve hook in `src/agent/agent.ts` (`trySolveChallenge`), and wiring in
-> `src/app.ts` / `src/service/resolverService.ts`. The sections below document
-> the design and the extension points for adding providers or challenge types.
+> backends:
+>
+> - **`capskip`** — [CapSkip](https://capskip.com/), a local flat-rate solver
+>   run on the same device/VPS. Speaks the classic 2captcha `in.php` / `res.php`
+>   API on `http://127.0.0.1:8080` by default; no cloud API key. Implemented by
+>   `LegacyCaptchaSolver`.
+> - **`capsolver`** / **`2captcha`** — hosted services using the Anti-Captcha-style
+>   create-task / poll JSON API. Implemented by `HttpCaptchaSolver`.
+>
+> Supported challenge families: reCAPTCHA v2/v3, hCaptcha, Cloudflare Turnstile
+> (any widget with an extractable site key). The relevant code:
+> `src/agent/captchaSolver.ts` (the service + both protocol clients), site‑key
+> capture in `src/agent/pageProbe.ts` + `src/browser/initScripts.ts`, the solve
+> hook in `src/agent/agent.ts` (`trySolveChallenge`), and wiring in `src/app.ts`
+> / `src/service/resolverService.ts`. The sections below document the design and
+> the extension points for adding providers or challenge types.
 
 > **Important — read this first**
 >

@@ -52,11 +52,12 @@ export const disabledSolver: CaptchaSolver = {
 
 type FetchFn = typeof fetch;
 
-type Provider = Exclude<AppConfig['captcha']['provider'], 'none'>;
+/** Providers that expose the Anti-Captcha-style JSON API (createTask / getTaskResult). */
+type JsonProvider = 'capsolver' | '2captcha';
 
 /** Provider-specific "proxyless" task type names. 2captcha's JSON API (api.2captcha.com) and
  * CapSolver both follow the Anti-Captcha spec but differ in casing / turnstile naming. */
-const TASK_TYPES: Record<Provider, Record<CaptchaKind, string>> = {
+const TASK_TYPES: Record<JsonProvider, Record<CaptchaKind, string>> = {
   capsolver: {
     'recaptcha-v2': 'ReCaptchaV2TaskProxyLess',
     'recaptcha-v3': 'ReCaptchaV3TaskProxyLess',
@@ -71,11 +72,11 @@ const TASK_TYPES: Record<Provider, Record<CaptchaKind, string>> = {
   },
 };
 
-function taskType(provider: Provider, kind: CaptchaKind): string {
+function taskType(provider: JsonProvider, kind: CaptchaKind): string {
   return TASK_TYPES[provider][kind];
 }
 
-function buildTaskPayload(provider: Provider, task: CaptchaTask): Record<string, unknown> {
+function buildTaskPayload(provider: JsonProvider, task: CaptchaTask): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     type: taskType(provider, task.kind),
     websiteURL: task.pageUrl,
@@ -117,13 +118,13 @@ interface TaskResultResponse {
 export class HttpCaptchaSolver implements CaptchaSolver {
   readonly enabled = true;
   private readonly cfg: AppConfig['captcha'];
-  private readonly provider: Provider;
+  private readonly provider: JsonProvider;
   private readonly logger: Logger;
   private readonly fetchImpl: FetchFn;
 
   constructor(cfg: AppConfig['captcha'], logger: Logger, fetchImpl: FetchFn = fetch) {
     this.cfg = cfg;
-    this.provider = cfg.provider as Provider;
+    this.provider = cfg.provider as JsonProvider;
     this.logger = logger.child({ component: 'captcha-solver', provider: cfg.provider });
     this.fetchImpl = fetchImpl;
   }
@@ -177,6 +178,108 @@ export class HttpCaptchaSolver implements CaptchaSolver {
   }
 }
 
+interface LegacyResponse {
+  status?: number;
+  request?: string;
+}
+
+/**
+ * Client for the classic 2captcha `in.php` / `res.php` HTTP API (submit a task,
+ * then poll for the token). This is the protocol exposed by CapSkip, a local
+ * flat-rate solver that runs on the device / VPS (default http://127.0.0.1:8080),
+ * and by legacy 2captcha-compatible endpoints. Requests use `json=1` so the
+ * responses are parsed as JSON rather than the `OK|TOKEN` text form.
+ */
+export class LegacyCaptchaSolver implements CaptchaSolver {
+  readonly enabled = true;
+  private readonly cfg: AppConfig['captcha'];
+  private readonly logger: Logger;
+  private readonly fetchImpl: FetchFn;
+
+  constructor(cfg: AppConfig['captcha'], logger: Logger, fetchImpl: FetchFn = fetch) {
+    this.cfg = cfg;
+    this.logger = logger.child({ component: 'captcha-solver', provider: cfg.provider });
+    this.fetchImpl = fetchImpl;
+  }
+
+  async solve(task: CaptchaTask, signal?: AbortSignal): Promise<CaptchaSolution | null> {
+    const timeout = AbortSignal.timeout(this.cfg.timeoutMs);
+    const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    const started = Date.now();
+    try {
+      const id = await this.submit(task, combined);
+      const token = await this.poll(id, combined);
+      this.logger.info('captcha solve finished', { ms: Date.now() - started, kind: task.kind, solved: !!token });
+      return token ? { token } : null;
+    } catch (err) {
+      this.logger.warn('captcha solve failed', { ms: Date.now() - started, kind: task.kind, error: (err as Error).message });
+      return null;
+    }
+  }
+
+  private submitParams(task: CaptchaTask): URLSearchParams {
+    const p = new URLSearchParams();
+    p.set('key', this.cfg.apiKey ?? '');
+    p.set('json', '1');
+    p.set('pageurl', task.pageUrl);
+    switch (task.kind) {
+      case 'recaptcha-v2':
+        p.set('method', 'userrecaptcha');
+        p.set('googlekey', task.sitekey);
+        if (task.invisible) p.set('invisible', '1');
+        break;
+      case 'recaptcha-v3':
+        p.set('method', 'userrecaptcha');
+        p.set('version', 'v3');
+        p.set('googlekey', task.sitekey);
+        if (task.action) p.set('action', task.action);
+        p.set('min_score', '0.3');
+        break;
+      case 'hcaptcha':
+        p.set('method', 'hcaptcha');
+        p.set('sitekey', task.sitekey);
+        break;
+      case 'turnstile':
+        p.set('method', 'turnstile');
+        p.set('sitekey', task.sitekey);
+        if (task.action) p.set('action', task.action);
+        break;
+    }
+    return p;
+  }
+
+  private async submit(task: CaptchaTask, signal: AbortSignal): Promise<string> {
+    const res = await this.fetchImpl(`${this.cfg.baseUrl}/in.php`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: this.submitParams(task).toString(),
+      signal,
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = (await res.json()) as LegacyResponse;
+    if (json.status !== 1 || !json.request) throw new Error(`in.php: ${json.request ?? 'unknown error'}`);
+    return json.request;
+  }
+
+  private async poll(id: string, signal: AbortSignal): Promise<string | null> {
+    await delay(this.cfg.pollIntervalMs, signal);
+    for (;;) {
+      if (signal.aborted) throw new Error('aborted');
+      const url = new URL(`${this.cfg.baseUrl}/res.php`);
+      url.searchParams.set('key', this.cfg.apiKey ?? '');
+      url.searchParams.set('action', 'get');
+      url.searchParams.set('id', id);
+      url.searchParams.set('json', '1');
+      const res = await this.fetchImpl(url.toString(), { signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = (await res.json()) as LegacyResponse;
+      if (json.status === 1) return json.request && json.request.length > 0 ? json.request : null;
+      if (json.request && json.request !== 'CAPCHA_NOT_READY') throw new Error(`res.php: ${json.request}`);
+      await delay(this.cfg.pollIntervalMs, signal);
+    }
+  }
+}
+
 function delay(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
@@ -197,5 +300,8 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
 
 export function createCaptchaSolver(cfg: AppConfig['captcha'], logger: Logger, fetchImpl?: FetchFn): CaptchaSolver {
   if (cfg.provider === 'none' || cfg.maxSolvesPerJob === 0) return disabledSolver;
+  // CapSkip (local, flat-rate) speaks the classic 2captcha in.php/res.php protocol.
+  if (cfg.provider === 'capskip') return new LegacyCaptchaSolver(cfg, logger, fetchImpl);
+  // capsolver / 2captcha use the Anti-Captcha-style JSON API.
   return new HttpCaptchaSolver(cfg, logger, fetchImpl);
 }
